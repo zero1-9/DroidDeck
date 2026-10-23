@@ -328,6 +328,9 @@ class SessionService : Service() {
         suspendAttemptFailed = false
         suspendController = null
         SessionState.suspended = false
+        SessionState.resumeRequested = false
+        SessionState.resuming = false
+        SessionState.resumeFailed = false
         SessionState.pipActive = false
         pipTask = false
         SessionState.program = intent?.getStringExtra(EXTRA_PROGRAM)
@@ -1210,6 +1213,7 @@ class SessionService : Service() {
     }
 
     private fun resumeSession(panelVisible: Boolean = true) {
+        if (SessionState.suspended) SessionState.resumeRequested = true
         if (panelVisible) activityVisible = true
         screenOn = readScreenOn()
         manualPauseRequested = false
@@ -1411,6 +1415,9 @@ class SessionService : Service() {
             suspendPolicy != SessionPrefs.SUSPEND_NEVER && hidden && downloadActive && !suspendDownloadNow
         if (suspendPolicy == SessionPrefs.SUSPEND_MANUAL && hidden && !downloadsBlockingSuspend) {
             manualPauseRequested = true
+        } else if (!hidden && !SessionState.suspended) {
+            // Coming back before the freeze finished keeps the game running instead of pausing it a moment later.
+            manualPauseRequested = false
         }
         val controller = suspendController ?: return
         if (downloadsBlockingSuspend) acquireLocks()
@@ -1436,6 +1443,7 @@ class SessionService : Service() {
             freezeCancelled = true
             controller.cancelFreeze()
         }
+        if (shouldSuspend && SessionState.suspended && !suspendOperationPending) SessionState.resumeRequested = false
         if (suspendOperationPending || suspendAttemptFailed || shouldSuspend == SessionState.suspended) return
         val gen = sessionGen
         suspendOperationPending = true
@@ -1459,6 +1467,7 @@ class SessionService : Service() {
                     freezePending = false
                     if (success) {
                         SessionState.suspended = true
+                        SessionState.resumeFailed = false
                         SessionEvents.transition(SessionPhase.SUSPENDED, "session.suspended")
                         releaseLocks()
                         refreshNotification()
@@ -1477,16 +1486,22 @@ class SessionService : Service() {
             }
         } else {
             acquireLocks()
+            SessionState.resuming = true
             controller.resume { success ->
                 mainHandler.post {
                     if (gen != sessionGen || !SessionState.running) return@post
                     suspendOperationPending = false
+                    SessionState.resuming = false
+                    SessionState.resumeRequested = false
                     if (success) {
                         SessionState.suspended = false
+                        SessionState.resumeFailed = false
                         SessionEvents.transition(SessionEvents.resumePhase(), "session.resumed")
                         refreshNotification()
                     } else {
                         suspendAttemptFailed = true
+                        SessionState.resumeFailures++
+                        SessionState.resumeFailed = true
                         Log.w(TAG, "could not confirm that the session resumed")
                     }
                     updateSuspendPolicy()
@@ -1576,6 +1591,9 @@ class SessionService : Service() {
                 return@post
             }
             SessionState.suspended = false
+            SessionState.resumeRequested = false
+            SessionState.resuming = false
+            SessionState.resumeFailed = false
             SessionState.pipActive = false
             pipTask = false
             SessionState.guestPid = -1
@@ -2022,6 +2040,7 @@ class SessionService : Service() {
 
         fun resume(context: Context) {
             if (!SessionState.running) return
+            if (SessionState.suspended) SessionState.resumeRequested = true
             context.startService(Intent(context, SessionService::class.java).setAction(ACTION_RESUME))
         }
 
